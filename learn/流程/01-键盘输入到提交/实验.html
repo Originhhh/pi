@@ -1,0 +1,422 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pi：从按下键盘到提交消息</title>
+<style>
+	* { box-sizing: border-box; }
+	body {
+		margin: 0;
+		font-family: -apple-system, "Microsoft YaHei", "PingFang SC", sans-serif;
+		color: #1f2937;
+		background: #f8fafc;
+		line-height: 1.6;
+	}
+	main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+	h1 { font-size: 22px; margin: 8px 0 12px; }
+	h2 { font-size: 17px; margin: 0 0 10px; }
+	.conclusion {
+		background: #e9f7ef;
+		border-left: 4px solid #2e9e5b;
+		padding: 10px 14px;
+		border-radius: 6px;
+		margin-bottom: 16px;
+	}
+	.grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+	.grid > * { min-width: 0; }
+	code { overflow-wrap: anywhere; }
+	@media (max-width: 760px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+	.card {
+		background: #fff;
+		border: 1px solid #e5e7eb;
+		border-radius: 8px;
+		padding: 14px;
+	}
+	svg { width: 100%; height: auto; display: block; }
+
+	/* 图示 */
+	.node rect, .node polygon { fill: #fff; stroke: #9ca3af; stroke-width: 1.2; }
+	.node text { font-size: 12px; text-anchor: middle; fill: #374151; }
+	.node .sub { font-size: 10px; fill: #6b7280; }
+	.node.io rect { fill: #e9f7ef; stroke: #2e9e5b; }
+	.edge { fill: none; stroke: #cbd5e1; stroke-width: 1.5; marker-end: url(#arr); }
+	.edge.dashed { stroke-dasharray: 5 4; }
+	.elabel { font-size: 10px; fill: #6b7280; }
+	.node.on rect, .node.on polygon { fill: #eef4ff; stroke: #3b6fd8; stroke-width: 2; }
+	.node.cur rect, .node.cur polygon { fill: #dbe7ff; stroke: #1d4ed8; stroke-width: 3; }
+	.node.warn rect, .node.warn polygon { fill: #fef3c7; stroke: #d97706; stroke-width: 2.5; }
+	.node.stop rect, .node.stop polygon { fill: #f3f4f6; stroke: #4b5563; stroke-width: 2.5; }
+	.edge.on { stroke: #3b6fd8; stroke-width: 2.5; marker-end: url(#arrOn); }
+	.legend { font-size: 12px; color: #6b7280; margin-top: 6px; }
+
+	/* 控件 */
+	label { display: block; font-size: 14px; margin: 6px 0; }
+	.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+	input[type=text] {
+		flex: 1; min-width: 0; font-size: 16px; padding: 8px 10px;
+		border: 2px solid #3b6fd8; border-radius: 6px; font-family: inherit;
+	}
+	button {
+		font-size: 14px; padding: 8px 12px; border-radius: 6px;
+		border: 1px solid #9ca3af; background: #fff; cursor: pointer; font-family: inherit;
+	}
+	button.primary { background: #3b6fd8; color: #fff; border-color: #3b6fd8; }
+	button:disabled { opacity: .5; cursor: not-allowed; }
+	.chips button { font-size: 13px; padding: 4px 8px; }
+	fieldset { border: 1px solid #e5e7eb; border-radius: 6px; margin: 10px 0; padding: 6px 10px; }
+	legend { font-size: 13px; color: #6b7280; }
+	.hint { font-size: 12px; color: #6b7280; }
+
+	.state { font-family: Consolas, monospace; font-size: 13px; background: #f8fafc; border-radius: 6px; padding: 8px; margin-top: 10px; }
+	.state div { display: flex; justify-content: space-between; gap: 8px; }
+	.t { color: #2e9e5b; font-weight: 600; }
+	.f { color: #9ca3af; }
+
+	ol.steps { padding-left: 22px; margin: 0; }
+	ol.steps li { margin-bottom: 6px; }
+	ol.steps li.warn { color: #b45309; }
+	ol.steps li.end { font-weight: 600; }
+	code { background: #f1f5f9; padding: 0 4px; border-radius: 4px; font-size: 13px; }
+	.placeholder { color: #9ca3af; }
+</style>
+</head>
+<body>
+<main>
+	<h1>Pi：从按下键盘到提交消息</h1>
+
+	<div class="conclusion">
+		<b>一句话结论：</b>按键依次经过终端、TUI、编辑器。按下回车后，交互模式根据输入内容和当前状态分流，普通消息最终由主循环调用 <code>session.prompt()</code>。
+	</div>
+
+	<div class="grid">
+		<section class="card">
+			<h2>核心示意图</h2>
+			<svg viewBox="0 0 400 720" aria-label="从按键到 session.prompt 的流程图">
+				<defs>
+					<marker id="arr" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#cbd5e1"/></marker>
+					<marker id="arrOn" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#3b6fd8"/></marker>
+				</defs>
+
+				<!-- 主流程边 -->
+				<path id="e-key" class="edge" d="M200,42 V64"/>
+				<path id="e-term" class="edge" d="M200,100 V122"/>
+				<path id="e-stdin" class="edge" d="M200,158 V180"/>
+				<path id="e-tui" class="edge" d="M200,216 V238"/>
+				<path id="e-editor" class="edge" d="M200,274 V296"/>
+				<path id="e-submit" class="edge" d="M200,332 V354"/>
+				<text class="elabel" x="208" y="57">原始字节</text>
+				<text class="elabel" x="208" y="115">字节流</text>
+				<text class="elabel" x="208" y="173">完整按键 · onInput</text>
+				<text class="elabel" x="208" y="231">按键</text>
+				<text class="elabel" x="208" y="289">回车 = tui.input.submit</text>
+				<text class="elabel" x="208" y="347">文字 · onSubmit</text>
+
+				<!-- 分流边 -->
+				<path id="e-r-comp" class="edge" d="M200,390 V410 H42 V438"/>
+				<path id="e-r-steer" class="edge" d="M200,390 V410 H120 V438"/>
+				<path id="e-r-bash" class="edge" d="M200,390 V410 H278 V438"/>
+				<path id="e-r-builtin" class="edge" d="M200,390 V410 H356 V438"/>
+				<path id="e-r-normal" class="edge" d="M200,390 V438"/>
+
+				<!-- 普通消息子流程边 -->
+				<path id="e-n-wait" class="edge" d="M200,480 V495"/>
+				<path id="e-wait-pending" class="edge" d="M256,517 H280"/>
+				<path id="e-wait-loop" class="edge" d="M200,537 V578"/>
+				<path id="e-pending-loop" class="edge" d="M338,534 V597 H252"/>
+				<path id="e-loop-out" class="edge" d="M200,614 V668"/>
+				<path id="e-steer-out" class="edge" d="M120,480 V668"/>
+				<path id="e-comp-out" class="edge dashed" d="M42,480 V668"/>
+				<text class="elabel" x="262" y="510">否</text>
+				<text class="elabel" x="206" y="560">是 · onInputCallback</text>
+				<text class="elabel" x="334" y="590" text-anchor="end">下次优先取出</text>
+
+				<!-- 主流程节点 -->
+				<g id="n-key" class="node io"><rect x="100" y="8" width="200" height="34" rx="17"/><text x="200" y="30">键盘按键（输入）</text></g>
+				<g id="n-term" class="node"><rect x="100" y="66" width="200" height="34" rx="6"/><text x="200" y="88">Terminal</text></g>
+				<g id="n-stdin" class="node"><rect x="100" y="124" width="200" height="34" rx="6"/><text x="200" y="146">StdinBuffer</text></g>
+				<g id="n-tui" class="node"><rect x="100" y="182" width="200" height="34" rx="6"/><text x="200" y="204">TUI</text></g>
+				<g id="n-editor" class="node"><rect x="100" y="240" width="200" height="34" rx="6"/><text x="200" y="262">Editor（焦点组件）</text></g>
+				<g id="n-submit" class="node"><rect x="100" y="298" width="200" height="34" rx="6"/><text x="200" y="320">submitValue</text></g>
+				<g id="n-route" class="node"><rect x="100" y="356" width="200" height="34" rx="6"/><text x="200" y="378">分流判断（交互模式）</text></g>
+
+				<!-- 分支节点 -->
+				<g id="b-comp" class="node"><rect x="6" y="440" width="72" height="40" rx="6"/><text x="42" y="457">压缩队列</text><text class="sub" x="42" y="472">压缩中</text></g>
+				<g id="b-steer" class="node"><rect x="84" y="440" width="72" height="40" rx="6"/><text x="120" y="457">steer</text><text class="sub" x="120" y="472">回复中</text></g>
+				<g id="b-normal" class="node"><rect x="164" y="440" width="72" height="40" rx="6"/><text x="200" y="457">普通消息</text><text class="sub" x="200" y="472">其余情况</text></g>
+				<g id="b-bash" class="node"><rect x="242" y="440" width="72" height="40" rx="6"/><text x="278" y="457">bash</text><text class="sub" x="278" y="472">直接执行</text></g>
+				<g id="b-builtin" class="node"><rect x="320" y="440" width="72" height="40" rx="6"/><text x="356" y="457">内置命令</text><text class="sub" x="356" y="472">直接执行</text></g>
+
+				<g id="n-wait" class="node"><polygon points="200,497 256,517 200,537 144,517"/><text x="200" y="521">主循环在等？</text></g>
+				<g id="n-pending" class="node"><rect x="282" y="500" width="112" height="34" rx="6"/><text x="338" y="521" style="font-size:11px">pendingUserInputs</text></g>
+				<g id="n-loop" class="node"><rect x="150" y="580" width="100" height="34" rx="6"/><text x="200" y="595">主循环</text><text class="sub" x="200" y="608">getUserInput()</text></g>
+				<g id="n-out" class="node io"><rect x="6" y="670" width="388" height="40" rx="20"/><text x="200" y="687">session.prompt()（输出）</text><text class="sub" x="200" y="702">→ 第二部分，本页不展开</text></g>
+			</svg>
+			<div class="legend">蓝色 = 本次经过的路径；深蓝 = 当前步骤；橙色 = 警告；灰色加粗 = 在此结束。虚线 = 压缩结束后发送，原文未展开机制。分支的左右位置不代表判断顺序。</div>
+		</section>
+
+		<section class="card">
+			<h2>小实验：模拟一次回车</h2>
+
+			<label for="input">编辑器里的文字（按回车或点"提交"）</label>
+			<div class="row">
+				<input id="input" type="text" value="你好" autocomplete="off">
+				<button id="submit" class="primary">提交</button>
+			</div>
+			<div class="row chips" style="margin-top:6px">
+				<span class="hint">试试：</span>
+				<button data-text="你好">你好</button>
+				<button data-text="/settings">/settings</button>
+				<button data-text="/settings abc">/settings abc</button>
+				<button data-text="!ls">!ls</button>
+				<button data-text="!">!</button>
+				<button data-text="/myext">/myext</button>
+				<button data-text="   ">空白</button>
+			</div>
+
+			<fieldset>
+				<legend>agent 状态</legend>
+				<label><input type="radio" name="agent" value="idle" checked> 空闲</label>
+				<label><input type="radio" name="agent" value="streaming"> 正在回复（isStreaming）</label>
+				<label><input type="radio" name="agent" value="compacting"> 正在压缩上下文（isCompacting）</label>
+			</fieldset>
+
+			<fieldset>
+				<legend>其他条件</legend>
+				<label><input type="checkbox" id="bashRunning"> 已有 bash 命令在运行（isBashRunning）</label>
+				<label><input type="checkbox" id="extCmd"> 把 <code>/myext</code> 这类非内置的 / 输入当作已注册的扩展命令</label>
+			</fieldset>
+
+			<div class="row">
+				<button id="resume">prompt 结束，主循环回到等待</button>
+				<button id="reset">重置</button>
+			</div>
+			<p class="hint">在真实运行中，<code>session.prompt()</code> 期间 agent 通常处于"正在回复"状态。这里把两者分开控制，方便单独观察每个分支。</p>
+
+			<div class="state" id="state"></div>
+		</section>
+	</div>
+
+	<section class="card" style="margin-top:16px">
+		<h2>发生了什么</h2>
+		<ol class="steps" id="steps"><li class="placeholder">提交一次输入，这里会逐步解释经过的每个环节。</li></ol>
+	</section>
+</main>
+
+<script>
+	// 与 interactive-mode.ts 中 setupEditorSubmitHandler 的内置命令一致
+	const BUILTIN_EXACT = ["/settings", "/scoped-models", "/share", "/copy", "/session", "/changelog", "/hotkeys", "/fork", "/clone", "/tree", "/trust", "/logout", "/new", "/reload", "/debug", "/arminsayshi", "/dementedelves", "/resume", "/quit"];
+	const BUILTIN_WITH_ARGS = ["/model", "/thinking", "/export", "/import", "/bug", "/name", "/login", "/compact"];
+
+	const STEP_MS = 450;
+	const $ = (id) => document.getElementById(id);
+
+	let state;
+	let busy = false;
+
+	function initialState() {
+		return { mainLoopWaiting: true, pendingUserInputs: [], compactionQueue: [] };
+	}
+
+	function agentState() {
+		return document.querySelector("input[name=agent]:checked").value;
+	}
+
+	function isBuiltin(text) {
+		if (BUILTIN_EXACT.includes(text)) return true;
+		return BUILTIN_WITH_ARGS.some((c) => text === c || text.startsWith(c + " "));
+	}
+
+	function esc(s) {
+		return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+	}
+
+	function renderState() {
+		const b = (v) => `<span class="${v ? "t" : "f"}">${v}</span>`;
+		const list = (a) => (a.length ? esc(JSON.stringify(a)) : "[]");
+		const agent = agentState();
+		$("state").innerHTML = `
+			<div><span>isStreaming</span>${b(agent === "streaming")}</div>
+			<div><span>isCompacting</span>${b(agent === "compacting")}</div>
+			<div><span>isBashRunning</span>${b($("bashRunning").checked)}</div>
+			<div><span>主循环在等待（onInputCallback 存在）</span>${b(state.mainLoopWaiting)}</div>
+			<div><span>pendingUserInputs</span><span>${list(state.pendingUserInputs)}</span></div>
+			<div><span>压缩队列</span><span>${list(state.compactionQueue)}</span></div>`;
+	}
+
+	function clearDiagram() {
+		document.querySelectorAll(".node, .edge").forEach((el) => el.classList.remove("on", "cur", "warn", "stop"));
+	}
+
+	function clearSteps() {
+		$("steps").innerHTML = "";
+	}
+
+	function setBusy(v) {
+		busy = v;
+		document.querySelectorAll("button, input").forEach((el) => (el.disabled = v));
+	}
+
+	// step: { ids: [...], html, cls?: "warn" | "end", mark?: "warn" | "stop" }
+	async function play(steps) {
+		setBusy(true);
+		for (const step of steps) {
+			document.querySelectorAll(".node.cur").forEach((el) => el.classList.remove("cur"));
+			for (const id of step.ids) {
+				const el = $(id);
+				el.classList.add("on");
+				if (el.classList.contains("node")) el.classList.add("cur");
+			}
+			if (step.mark) {
+				const last = $(step.ids[step.ids.length - 1]);
+				last.classList.remove("cur");
+				last.classList.add(step.mark);
+			}
+			const li = document.createElement("li");
+			li.innerHTML = step.html;
+			if (step.cls) li.className = step.cls;
+			$("steps").appendChild(li);
+			await new Promise((r) => setTimeout(r, STEP_MS));
+		}
+		setBusy(false);
+		renderState();
+	}
+
+	function buildSteps(raw) {
+		const text = raw.trim();
+		const shown = esc(text);
+		const steps = [
+			{ ids: ["n-key", "e-key", "n-term"], html: "按下回车。终端处于<b>原始模式</b>，每个按键立即送给程序，不用等整行。" },
+			{ ids: ["e-term", "n-stdin"], html: "<code>Terminal</code> 把 stdin 收到的字节交给 <code>StdinBuffer</code>。" },
+			{ ids: ["e-stdin", "n-tui"], html: "<code>StdinBuffer</code> 识别出一个完整按键 <code>\\r</code>，通过 <code>onInput</code> 回调交给 <code>TUI.handleTerminalInput()</code>。" },
+			{ ids: ["e-tui", "n-editor"], html: "TUI 把按键交给<b>焦点组件</b> <code>Editor</code>，随后立即重绘界面。" },
+			{ ids: ["e-editor", "n-submit"], html: "回车匹配可配置的快捷键 <code>tui.input.submit</code>，编辑器调用 <code>submitValue()</code>。" },
+			{ ids: ["e-submit", "n-route"], html: `<code>submitValue()</code> 拼接各行并去掉首尾空白，得到 <code>"${shown}"</code>。它清空编辑器，再调用 <code>onSubmit</code>。` },
+		];
+
+		if (!text) {
+			steps.push({ ids: ["n-route"], mark: "stop", cls: "end", html: "文字为空：<code>onSubmit</code> 直接 return。什么也不会发生。" });
+			return { steps };
+		}
+
+		if (isBuiltin(text)) {
+			steps.push({ ids: ["e-r-builtin", "b-builtin"], mark: "stop", cls: "end", html: `<code>${shown}</code> 是内置命令。交互模式直接处理它，然后 return。它不会发给模型。` });
+			return { steps };
+		}
+
+		let note = "";
+		if (text.startsWith("/")) {
+			const name = esc(text.split(" ")[0]);
+			note = BUILTIN_EXACT.includes(text.split(" ")[0])
+				? `注意：<code>${name}</code> 只接受不带参数的精确输入，所以 <code>${shown}</code> 不算内置命令，继续往下判断。`
+				: `<code>${name}</code> 不在内置命令列表里，继续往下判断。`;
+		}
+
+		if (text.startsWith("!")) {
+			const excluded = text.startsWith("!!");
+			const command = (excluded ? text.slice(2) : text.slice(1)).trim();
+			if (command) {
+				if ($("bashRunning").checked) {
+					steps.push({ ids: ["e-r-bash", "b-bash"], mark: "warn", cls: "warn", html: "已有 bash 命令在运行：显示警告，把文字放回编辑器，然后 return。按 Esc 可以取消正在运行的命令。" });
+					return { steps, restore: raw };
+				}
+				steps.push({ ids: ["e-r-bash", "b-bash"], mark: "stop", cls: "end", html: `执行 bash 命令 <code>${esc(command)}</code>，然后 return。${excluded ? "<code>!!</code> 表示命令结果不进入上下文。" : "这个判断不看 agent 是否在回复。"}` });
+				return { steps };
+			}
+			note = "只有 <code>!</code>，命令为空，所以不算 bash 命令，继续往下判断。";
+		}
+
+		const agent = agentState();
+		const ext = text.startsWith("/") && $("extCmd").checked;
+
+		if (agent === "compacting") {
+			if (ext) {
+				steps.push({ ids: ["e-r-comp", "b-comp", "e-comp-out", "n-out"], cls: "end", html: `${note} 正在压缩，但这是扩展命令。扩展命令是例外：立即调用 <code>session.prompt()</code>。` });
+				return { steps };
+			}
+			steps.push({ ids: ["e-r-comp", "b-comp"], mark: "stop", cls: "end", html: `${note} 正在压缩上下文：消息放入压缩队列，等压缩结束再发送。发送的具体机制原文没有展开，本页不模拟。` });
+			return { steps, compactionPush: text };
+		}
+
+		if (agent === "streaming") {
+			steps.push({ ids: ["e-r-steer", "b-steer", "e-steer-out", "n-out"], cls: "end", html: `${note} agent 正在回复：调用 <code>session.prompt(text, { streamingBehavior: "steer" })</code>。这是<b>引导消息</b>，它在当前这一轮结束后进入对话。这条路径不经过主循环。` });
+			return { steps };
+		}
+
+		steps.push({ ids: ["e-r-normal", "b-normal", "e-n-wait", "n-wait"], html: `${note} 不是命令，也不在压缩或回复中：按普通消息处理。接下来看主循环是否正在等待输入。` });
+
+		if (state.mainLoopWaiting) {
+			steps.push({ ids: ["e-wait-loop", "n-loop"], html: "主循环停在 <code>await getUserInput()</code>。<code>onInputCallback</code> 就是这个 Promise 的 <code>resolve</code>，调用它，主循环继续执行。" });
+			steps.push({ ids: ["e-loop-out", "n-out"], cls: "end", html: "主循环执行 <code>await session.prompt(userInput)</code>，消息进入第二部分。主循环现在忙于这次 prompt，不再等待输入。" });
+			return { steps, consumed: true };
+		}
+
+		steps.push({ ids: ["e-wait-pending", "n-pending"], mark: "stop", cls: "end", html: "主循环没有在等待（<code>onInputCallback</code> 为 undefined）：文字放进 <code>pendingUserInputs</code> 队列，不会丢失。点「prompt 结束，主循环回到等待」可以看它被取出。" });
+		return { steps, pendingPush: text };
+	}
+
+	async function submit() {
+		if (busy) return;
+		const raw = $("input").value;
+		const result = buildSteps(raw);
+		// submitValue() 先清空编辑器
+		$("input").value = "";
+		clearDiagram();
+		clearSteps();
+		if (result.consumed) state.mainLoopWaiting = false;
+		if (result.pendingPush) state.pendingUserInputs.push(result.pendingPush);
+		if (result.compactionPush) state.compactionQueue.push(result.compactionPush);
+		await play(result.steps);
+		if (result.restore !== undefined) $("input").value = result.restore;
+		$("input").focus();
+	}
+
+	async function resume() {
+		if (busy) return;
+		clearDiagram();
+		clearSteps();
+		if (state.pendingUserInputs.length === 0) {
+			state.mainLoopWaiting = true;
+			await play([{ ids: ["n-loop"], cls: "end", html: "上一次 prompt 结束。主循环再次调用 <code>getUserInput()</code>，队列为空，于是创建新的 Promise，并把 <code>resolve</code> 存进 <code>onInputCallback</code>，开始等待。" }]);
+			return;
+		}
+		const text = state.pendingUserInputs.shift();
+		state.mainLoopWaiting = false;
+		await play([
+			{ ids: ["n-pending", "e-pending-loop", "n-loop"], html: `上一次 prompt 结束。主循环调用 <code>getUserInput()</code>，发现 <code>pendingUserInputs</code> 不为空，直接取出 <code>"${esc(text)}"</code> 返回，不用等待。` },
+			{ ids: ["e-loop-out", "n-out"], cls: "end", html: "主循环执行 <code>await session.prompt()</code>。主循环又进入忙碌状态。" },
+		]);
+	}
+
+	function reset() {
+		state = initialState();
+		document.querySelector("input[name=agent][value=idle]").checked = true;
+		$("bashRunning").checked = false;
+		$("extCmd").checked = false;
+		$("input").value = "你好";
+		clearDiagram();
+		$("steps").innerHTML = '<li class="placeholder">提交一次输入，这里会逐步解释经过的每个环节。</li>';
+		renderState();
+	}
+
+	$("submit").addEventListener("click", submit);
+	$("input").addEventListener("keydown", (e) => {
+		if (e.key === "Enter") {
+			e.preventDefault();
+			submit();
+		}
+	});
+	$("resume").addEventListener("click", resume);
+	$("reset").addEventListener("click", reset);
+	document.querySelectorAll("[data-text]").forEach((b) =>
+		b.addEventListener("click", () => {
+			$("input").value = b.dataset.text;
+			$("input").focus();
+		}),
+	);
+	document.querySelectorAll("input[name=agent], #bashRunning").forEach((el) => el.addEventListener("change", renderState));
+
+	reset();
+</script>
+</body>
+</html>
